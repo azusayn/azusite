@@ -9,11 +9,11 @@ tags:
 
 ## 谁管理缓存？
 
-![Fig.1](/images/cache/cache_owner.svg)
+<img src="/images/cache/cache_owner.svg" alt="Fig.1" style="zoom: 75%;" />
 
 ## 缓存和 DB 如何更新？
 
-![Fig.2](/images/cache/cache_update.svg)
+<img src="/images/cache/cache_update.svg" alt="Fig.2" style="zoom: 75%;" />
 
 ## Cache Eviction
 
