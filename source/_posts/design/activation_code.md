@@ -51,6 +51,6 @@ SGVsbG8gdGhpcyBpcyBhIHNhbXBsZSBsaWNlbnNlIGNvZGUgZm9yIHlvdXIgYmFzZSBzeXN0ZW0uIEl0
 
 在生产领域，这个问题无法完美解决。但是可以提供额外的方法增加破解成本：
 
-1. 使用开源的 `mainline/garble` 工具对 Go 二进制进行混淆，擦除反射信息和字符串，让黑客用 IDA Pro 逆向时找不到 `VerifyLicense` 或 `publicKey` 这种明显的关键字。
+1. 使用 GO 库 `mvdan.cc/garble` 对二进制进行混淆，擦除反射信息和字符串，让黑客用 IDA Pro 逆向时找不到 `VerifyLicense` 或 `publicKey` 这种明显的关键字。
 2. 将 License 拆分，散落在程序的不同位置，程序运行时拼接使用。
 3. 在程序执行的多个位置进行随机 License 校验，而不是只在启动时进行校验
