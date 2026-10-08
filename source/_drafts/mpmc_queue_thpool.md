@@ -34,8 +34,6 @@ tags:
 
 > TODO：关于我对信号的一些看法
 
-> 阻塞和 task status 的关系
-
 站在现在的角度看，上面的设计不足在于：
 
 - 条件变量阻塞和唤醒时（准确的唤醒后进入就绪态，直到 CPU 被抢占时），线程会发生上下文切换。一般而言线程上下文切换开销 $1 \sim 10 \mu s$。
@@ -43,39 +41,7 @@ tags:
 
 ### 2.2 利用原子操作进行同步
 
-## 5. 其他
-
-这是不是和 GMP 有点类似？
-
-感觉这个设计核心其实在于内存而不是多线程。
-
-固定线程和动态线程。
-
-volatile & 可见性与内存屏障, std::atomic 这个类型
-
-threads_.emplace_back(&ThreadPool::loop, this); 这个函数什么意思来着
-
-- 条件变量范式，一定是 mutex + state + cond_variable
-为什么条件变量还需要一把锁 => 因为一定要有变量来防止信号丢失 => 为了解决数据竞争一定要用锁保护
-同时因为有状态变量，两个线程需要并发读写
-如果不带锁，会造成系统出现一致性问题（比如发送者要更新两个变量才算某个状态完成）
-比如发送者搬家了，接受者一看旧的地址去找发送者，发送者更新地址
-然后哦吼！
-思考路径：
-- 先想想要通知什么条件
-- 思考这个条件怎么存
-- 肯定要一把锁
-整个过程有点繁琐，但其实 C++ 20 开始有 semaphore 内部搞定了这些麻烦的事情。代码看起来更加舒服。
-
-notify 写在外面不然刚醒来就撞到锁上面了
-
-这里有 Lost WakeUp 问题，信号可能会丢失。
-
-使用 unique lock 因为可以随叫随到，而不是 lock guard
-
-什么是 TOCTOU - time to check, time to use.
-
-## 无锁队列
+## 基本思路
 
 ### 链表队列和环形队列 (Ring Buffer)
 
@@ -84,7 +50,7 @@ notify 写在外面不然刚醒来就撞到锁上面了
 
 如果使用链表（Linked List），消费的时候会删除头节点，插入的时候会分配新节点内存，导致频繁的内存分配与释放
 
-所以这个时候就要引入环形队列 （Ring Buffer），预先分配好固定的槽位（Slot），同时通过循环使用顺序表
+所以这个时候就要引入环形队列 （Ring Buffer），预先分配好固定的槽位（Slot），同时通过循环使用顺序表达到分配空间的重复利用。
 
 ### 原子锁与互斥锁
 
@@ -117,7 +83,55 @@ mutex 竞争会导致极大的开销（TODO: 见 §）
 在 Golang 里，标准库限制了开发者能使用的原子调用的参数。比如一般只会使用 `CompareAndSwapXxx` 这样的函数，它相当于使用 `compare_exchange_strong` 搭配
 `memory_order_seq_cst` 内存序。牺牲了控制粒度，但是写起来更加直观。
 
+## 基于 LMAX Disruptor 的具体实现
+
+无锁队列的实现有多种，需要根据不同场景去选择实际的模型。具体有：
+
+TODO：有什么嗨啊。
+
+接下来的实现基于 LMAX 公司在 2011 发布的一篇 [论文](https://lmax-exchange.github.io/disruptor/disruptor.html)。这篇文章并不是最早提出无锁队列概念的文章（比如在 1996 年就有更经典的 Michael & Scott Queue ），但是在实际场景下讨论了诸多经典的并发模型概念（Lock-Free, Ring Buffer, Cache-Locality, Mechanical Sympathy, Memories Barries 等），具有比较大的工程意义。
+
+这篇文章讨论了被称之为 Disruptor 的模型 TODO：核心思想是什么：然后开始吧啦吧啦对照自己的实现
+
+### 数据结构
+
+Disruptor 的数据结构基于 Ring Buffer。每一个可以被消费的位置（TODO: 这表达。。。）被称为槽（Slot）。生产者 (下标用 producer 表示) 填充下标为 i 的 Slot 之后，继续处理下标为 i + 1 位置的数据。消费者 (下标用 consumer 表示) 则紧随其后消费生产的数据。（TODO：循环队列）。队列空的条件是（TODO：这能叫队列吗） `consuemr + 1 == producer`。队列满的条件是 `producer + 1 == consumer`。
+
+### 实现（TODO 放在另一个文章好了？）
+
+项目代码放在 [azusayn/thpoolcc](https://github.com/azusayn/thpoolcc)。是一个 C++ 实现的 .hpp 库。具体定义了如下四个接口
+
+```c++
+  // initialization.
+  ThreadPool(uint32_t n_threads, uint32_t queueSize = 8192);
+
+  // submits a task (non-blocking), returns false if the queue is full. 
+  bool Submit(std::function<void()> func);
+
+  // destroys the thread pool and recycle all the resources.
+  void Destroy();
+  
+  // waits until the task queue is empty and all threads are idle.
+  void Wait();
+```
+
+## 性能测试
+
+## 反思
+
+啊原来还有 futex 这种东西，啊短锁导致的不一定原子就快，啊 darwin 里面是对这个短锁有优化吗。
+
+原子锁的劣势。cache 竞争之类的。
+
 ## 更多细节
+
+### ABA 问题
+
+假设我们有两个 Task： t0 和 t1，它们在一个栈中生产或消费数据。
+
+最开始，栈里面放着值 A，
+
+其实我认为 ABA 应该被称之为一个现象，并非出现 ABA 的位置都会对系统逻辑造成影响。
 
 ### mutex 耗时的原因， 唤醒与睡眠
 
@@ -126,7 +140,9 @@ mutex 竞争会导致没有抢到锁的线程陷入阻塞状态（由于用户�
 
 寄存器上下文需要存入栈中，唤醒的时候需要从进程栈中恢复。
 
-TODO: 不同线程执行的过程中，对内存的访问情况不一样，缓存行被不同的线程争夺导致程序局部性丧失？
+TODO: 不同线程执行的过程中，对内存的访问情况不一样，缓存行被不同的线程争夺导致程序局部性丧失？太是了，缓存污染
+
+slow path and fast path
 
 ### 虽然觉得没什么意思，但是和 C++ 进行颤斗的细节
 
@@ -139,8 +155,102 @@ std::atomic<int> v1(1);
 
 - compare_exchange_weak 和 compare_exchange_strong 的区别
 
-- aba 问题
-
 - 内存序，内存屏障，可见性。C++ 和 golang 的区别。
 
 - MESI 和缓存
+
+## 5. 其他
+
+这是不是和 GMP 有点类似？
+
+感觉这个设计核心其实在于内存而不是多线程。
+
+固定线程和动态线程。
+
+volatile & 可见性与内存屏障, std::atomic 这个类型
+
+threads_.emplace_back(&ThreadPool::loop, this); 这个函数什么意思来着
+
+- 条件变量范式，一定是 mutex + state + cond_variable
+为什么条件变量还需要一把锁 => 因为一定要有变量来防止信号丢失 => 为了解决数据竞争一定要用锁保护
+同时因为有状态变量，两个线程需要并发读写
+如果不带锁，会造成系统出现一致性问题（比如发送者要更新两个变量才算某个状态完成）
+比如发送者搬家了，接受者一看旧的地址去找发送者，发送者更新地址
+然后哦吼！
+思考路径：
+- 先想想要通知什么条件
+- 思考这个条件怎么存
+- 肯定要一把锁
+整个过程有点繁琐，但其实 C++ 20 开始有 semaphore 内部搞定了这些麻烦的事情。代码看起来更加舒服。
+
+notify 写在外面不然刚醒来就撞到锁上面了
+
+这里有 Lost WakeUp 问题，信号可能会丢失。
+
+使用 unique lock 因为可以随叫随到，而不是 lock guard
+
+### Concurrency Concept
+
+concurrency tasks in parallel & tasks contend on access to resources
+
+concurrent excution of code is mutual exclusion & visibility of change.
+
+### Memorry Barries
+
+内存屏障分为
+
+- read  (acquire，后面的指令不能跑到前面去，防止有人偷偷读了旧数据，torn read？)
+- write (release，前面的指令不能跑到后面去，要在这个节点前把数据都一起发布，而不是发布一半，不然不一致)
+- full
+
+想象一下 CPU 进行处理的时候有一个执行队列，全屏障 (比如 mfence) 就是屏障指令前面的不能跑到后面去，后面的也不能跑到前面来。半屏障就是
+只防一边。
+
+TODO: 这里只考虑了单核心的情况，多核心还没有想明白
+
+内存屏障保证两个东西：
+
+- Visibility
+- Ordering （这里必须区分编译器对优化器插入的软件屏障，内存屏障是对 CPU 乱序执行核心起作用的）
+    引用一下 LMAX 文章原文的话
+    > Compilers can put in place complimentary software barriers to ensure the ordering of compiled code, such software memory barriers
+    > are in addition to the hardware barriers used by the processors themselves.
+
+    [软硬件屏障定义](https://www.bruceblinn.com/5-LinuxCorner/MemoryBarriers.html?utm_source=gemini#:~:text=All%20other%20memory%20barriers%20in%20the%20Linux,CPU%2C%20hardware%20memory%20barriers%20are%20not%20needed)
+
+上面我们知道了并发代码的核心是互斥（TODO: 这能这么这么翻译吗）以及可见性
+
+可见性一个表现就是某个线程对内存的修改要能让别的线程感知到，由于现代 CPU 都会有 Store Buffer、 L1、L2、L3 缓存（越近的越快、越贵），
+线程所谓对内存的修改，可能只会写在 store buffer。所以需要使用内存屏障，让核心强制把 store buffer 排空，将别的核心对应 cache line（TODO：？）
+标记为失效。对于消费者来说，由于他发现访问的内存位置被设计为失效了，接下来根据不同的架构要分两种情况：
+
+1. 点对点传输，他们直接在 L1/L2 就完成了同步
+2. 排空 store buffer 的时候顺着链路直接写到 L3, 这样别的核心就能直接从 L3 拿新数据
+
+（根据调查 12600K 混合使用了两种同步的方式，甚至根据距离远近来判断走 L3 还是直接点对点
+
+- Cache 读，从 L1 -> L2 -> L3 -> Cache 去读。 从内存写回的时候 L1、L2、L3 全部一起更新。具体的更新机制也许参考 MESI？（其实 CPU 和 L1 Cache 之间还有一个
+Store Buffer）
+
+- memory_order_seq_cst (全世界大钟) 和 memory_order_acq_rel (同时有 acq + rel)
+
+尽管我们能控制屏障前/后指令的分隔，但是一个核心的指令执行顺序在别的核心可能是不同的，
+在某些场景会造成问题。比如一个生产者它执行了一串指令，CPU 不可能直接锁住总线去更新其他核心的 cache，而其实是每一个核心都有一个 invalidation queue。
+生产者执行指令产生的 invalidation 可能会乱序到达核心的 invalidation queue
+
+使用 memory_order_seq_cst (sequential consistency)可以很严格的保证屏障分界，同时所有核心看到的指令执行顺序都保证一致。目前理解是，某些算法需要对执行步骤的严格共识
+才需要这个。但不设置 memory_order 的时候就是这个等级，Go 里的原子操作也是默认这个等级。
+
+除此之外还有 memory_order_acq_rel 这种东西，同时兼具 acquire 和 release 的功能。主要用在需要读的同时也要写状态。比如假设每个 task 就是消费一个 index，task 需要使用
+`memory_order_acq_rel` 保证后面的操作不会读到不一致的数据，同时原子地将新的索引位置发布。
+
+### Cache Line
+
+cache line 一般是 64B，但是要具体看硬件
+
+- False Sharing
+
+您猜怎么着，还真有 True Sharing 这个东西。但其实都不是什么好事。如果是两个跨核心线程（同核心在自己的 L1 就搞定了）修改同一个变量，导致不同核心对应某个内存空间的
+cache line 被反复争夺（失效接着去内存找）
+
+### 代码中使用的优化小 tips
